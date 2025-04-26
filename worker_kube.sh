@@ -1,17 +1,80 @@
 #!/bin/bash
+# worker-node.sh
+# Script to configure a Kubernetes worker node using kubeadm
+# Run as root (sudo -i)
 
-sudo su
-apt update -y
-apt install docker.io -y
+# 1) Disable swap & add kernel settings
+swapoff -a
+sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
-systemctl start docker
-systemctl enable docker
+# 2) Add kernel settings & Enable IP tables (CNI Prerequisites)
+cat <<EOF | tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
 
-curl -fsSL "https://packages.cloud.google.com/apt/doc/apt-key.gpg" | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/kubernetes-archive-keyring.gpg
-echo 'deb https://packages.cloud.google.com/apt kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
+modprobe overlay
+modprobe br_netfilter
 
-apt update -y
-apt install kubeadm=1.20.0-00 kubectl=1.20.0-00 kubelet=1.20.0-00 -y
+cat <<EOF | tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
 
-sudo su
-kubeadm reset pre-flight checks
+sysctl --system
+
+# 3) Install containerd runtime
+apt-get update -y
+apt-get install ca-certificates curl gnupg lsb-release -y
+
+# Add Docker's official GPG key
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+# Set up Docker repository
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install containerd
+apt-get update -y
+apt-get install containerd.io -y
+
+# Generate default configuration file for containerd
+containerd config default > /etc/containerd/config.toml
+
+# Configure cgroup as systemd for containerd
+sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+
+# Restart and enable containerd service
+systemctl restart containerd
+systemctl enable containerd
+
+# 4) Install Kubernetes components (updated for newer Ubuntu)
+# Update the apt package index and install packages needed
+apt-get update
+apt-get install -y apt-transport-https ca-certificates curl
+
+# Download the Google Cloud public signing key (newer method)
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# Add the Kubernetes apt repository (updated URL)
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+
+# Update apt package index, install kubelet, kubeadm and kubectl
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
+
+# Pin their version to prevent automatic upgrades
+apt-mark hold kubelet kubeadm kubectl
+
+# Enable and start kubelet service
+systemctl daemon-reload
+systemctl start kubelet
+systemctl enable kubelet.service
+
+echo "Worker node preparation complete!"
+echo "---------------------------------------"
+echo "Next steps:"
+echo "1. Run the 'kubeadm join' command provided by the master node"
+echo "   The command looks like: kubeadm join <master-ip>:<port> --token <token> --discovery-token-ca-cert-hash <hash>"
+echo "---------------------------------------"
